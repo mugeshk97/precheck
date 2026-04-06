@@ -16,6 +16,7 @@ import os
 import re
 import unicodedata
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from statistics import mean
 from typing import Optional
@@ -130,14 +131,16 @@ def auto_select_isi(fa_text: str, isi_dir: str) -> tuple[str, float]:
     if not isi_files:
         raise FileNotFoundError(f"No .docx files found in {isi_dir}")
 
-    fa_sample = normalize_text(fa_text[:4000])
+    fa_norm = normalize_text(fa_text)
     best_path, best_score = "", -1.0
 
     for isi_path in isi_files:
         isi_text = extract_text_from_docx(str(isi_path))
-        isi_sample = normalize_text(isi_text[:4000])
-        score = fuzz.token_set_ratio(fa_sample, isi_sample)
-        print(f"    {isi_path.name}: {score:.0f}")
+        isi_norm = normalize_text(isi_text)
+        
+        # Multiply by 100 to map ratio() (which returns 0.0-1.0) to a 0-100 scale
+        score = SequenceMatcher(None, isi_norm, fa_norm).ratio() * 100
+        print(f"    {isi_path.name}: {score:.1f}")
         if score > best_score:
             best_score = score
             best_path = str(isi_path)
@@ -463,7 +466,7 @@ def _get_openai_client() -> tuple[AsyncOpenAI | AsyncAzureOpenAI, str]:
     """
     api_key = os.getenv("OPENAI_API_KEY")
     if api_key:
-        return AsyncOpenAI(api_key=api_key), "o3-mini"
+        return AsyncOpenAI(api_key=api_key), "gpt-4o-mini"
 
     azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
     if azure_endpoint:
@@ -471,7 +474,7 @@ def _get_openai_client() -> tuple[AsyncOpenAI | AsyncAzureOpenAI, str]:
         token_provider = get_bearer_token_provider(
             credential, "https://cognitiveservices.azure.com/.default"
         )
-        deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "o3-mini")
+        deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")
         client = AsyncAzureOpenAI(
             azure_endpoint=azure_endpoint,
             azure_ad_token_provider=token_provider,
