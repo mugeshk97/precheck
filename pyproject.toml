@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "azure-ai-documentintelligence>=1.0.2",
+    "azure-identity>=1.25.3",
     "langchain>=1.2.13",
     "langchain-community>=0.4.1",
     "langchain-openai>=1.1.11",
@@ -16,5 +17,6 @@ dependencies = [
     "python-docx>=1.2.0",
     "python-dotenv>=1.2.2",
     "rapidfuzz>=3.14.3",
+    "spacy>=3.8.14",
     "tenacity>=9.1.4",
 ]

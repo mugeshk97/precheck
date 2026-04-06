@@ -26,7 +26,8 @@ from azure.core.credentials import AzureKeyCredential
 from docx import Document
 from dotenv import load_dotenv
 from nltk.tokenize import sent_tokenize
-from openai import AsyncOpenAI
+from azure.identity import ManagedIdentityCredential, get_bearer_token_provider
+from openai import AsyncAzureOpenAI, AsyncOpenAI
 from pydantic import BaseModel, Field
 from rapidfuzz import fuzz
 from tenacity import (
@@ -147,7 +148,7 @@ def auto_select_isi(fa_text: str, isi_dir: str) -> tuple[str, float]:
 # ── Phase 1: ISI Blueprint via gpt-4o ─────────────────────────────────────────
 
 async def generate_isi_blueprint(
-    client: AsyncOpenAI, isi_text: str, token_log: dict
+    client: AsyncOpenAI | AsyncAzureOpenAI, isi_text: str, token_log: dict, model: str = "gpt-4o-mini"
 ) -> ISIBlueprint:
     """Parse the ISI into a structured Pydantic blueprint using gpt-4o."""
 
@@ -159,7 +160,7 @@ async def generate_isi_blueprint(
     )
     async def _call() -> ISIBlueprint:
         response = await client.beta.chat.completions.parse(
-            model="gpt-4o-mini",
+            model=model,
             messages=[
                 {
                     "role": "system",
@@ -191,11 +192,12 @@ def _content_hash(text: str) -> str:
 
 
 async def _extract_page_fragments(
-    client: AsyncOpenAI,
+    client: AsyncOpenAI | AsyncAzureOpenAI,
     page_num: int,
     page_text: str,
     section_titles: list[str],
     token_log: dict,
+    model: str = "gpt-4o-mini",
 ) -> tuple[int, FAPageFragments]:
     """Extract ISI-like fragments from a single FA page (with retries)."""
 
@@ -207,7 +209,7 @@ async def _extract_page_fragments(
     )
     async def _call() -> FAPageFragments:
         response = await client.beta.chat.completions.parse(
-            model="gpt-4o-mini",
+            model=model,
             messages=[
                 {
                     "role": "system",
@@ -240,15 +242,16 @@ async def _extract_page_fragments(
 
 
 async def extract_all_fa_pages(
-    client: AsyncOpenAI,
+    client: AsyncOpenAI | AsyncAzureOpenAI,
     pages: dict[int, str],
     blueprint: ISIBlueprint,
     token_log: dict,
+    model: str = "gpt-4o-mini",
 ) -> list[tuple[int, FAPageFragments]]:
     """Concurrently process all non-empty FA pages."""
     section_titles = [s.title for s in blueprint.sections]
     tasks = [
-        _extract_page_fragments(client, pnum, ptext, section_titles, token_log)
+        _extract_page_fragments(client, pnum, ptext, section_titles, token_log, model)
         for pnum, ptext in pages.items()
         if ptext.strip()
     ]
@@ -263,19 +266,32 @@ async def extract_all_fa_pages(
     return good
 
 
+def _resolve_section_title(raw_title: str, canonical_titles: list[str]) -> str:
+    """Fuzzy-match a LLM-returned section title to the nearest blueprint title."""
+    from rapidfuzz import process as rfprocess
+    match = rfprocess.extractOne(raw_title, canonical_titles, scorer=fuzz.token_set_ratio)
+    return match[0] if match else raw_title
+
+
 def deduplicate_fragments(
     page_results: list[tuple[int, FAPageFragments]],
+    canonical_titles: list[str] | None = None,
 ) -> dict[str, list[str]]:
     """
     Merge fragments across pages by section.
-    Strip exact duplicates (hash) and near-duplicates (>90 fuzzy similarity).
+    - Fuzzy-resolves LLM section titles to canonical blueprint titles (prevents key mismatches).
+    - Strips exact duplicates (hash) and near-duplicates (>90 fuzzy similarity).
     """
     section_map: dict[str, list[str]] = {}
     seen_hashes: set[str] = set()
 
     for _pnum, page_frags in page_results:
         for group in page_frags.extractions:
-            section = group.section_title
+            section = (
+                _resolve_section_title(group.section_title, canonical_titles)
+                if canonical_titles
+                else group.section_title
+            )
             section_map.setdefault(section, [])
             for frag in group.fragments:
                 h = _content_hash(frag)
@@ -432,11 +448,37 @@ def _get_azure_client() -> DocumentIntelligenceClient:
     return DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
 
 
-def _get_openai_client() -> AsyncOpenAI:
+def _get_openai_client() -> tuple[AsyncOpenAI | AsyncAzureOpenAI, str]:
+    """
+    Returns (client, model_or_deployment_name).
+
+    Priority:
+      1. OPENAI_API_KEY present → standard OpenAI, model "gpt-4o-mini"
+      2. AZURE_OPENAI_ENDPOINT present → Azure OpenAI via Managed Identity,
+         deployment from AZURE_OPENAI_DEPLOYMENT (defaults to "gpt-4o-mini")
+    """
     api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("Missing OPENAI_API_KEY in .env")
-    return AsyncOpenAI(api_key=api_key)
+    if api_key:
+        return AsyncOpenAI(api_key=api_key), "gpt-4o-mini"
+
+    azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    if azure_endpoint:
+        credential = ManagedIdentityCredential()
+        token_provider = get_bearer_token_provider(
+            credential, "https://cognitiveservices.azure.com/.default"
+        )
+        deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")
+        client = AsyncAzureOpenAI(
+            azure_endpoint=azure_endpoint,
+            azure_ad_token_provider=token_provider,
+            api_version="2025-01-01-preview",
+        )
+        return client, deployment
+
+    raise ValueError(
+        "No OpenAI credentials found. "
+        "Set OPENAI_API_KEY for OpenAI, or AZURE_OPENAI_ENDPOINT for Azure OpenAI with Managed Identity."
+    )
 
 
 # ── Main pipeline ──────────────────────────────────────────────────────────────
@@ -448,7 +490,7 @@ async def run_pipeline(
     debug: bool = False,
 ) -> dict:
     azure_client = _get_azure_client()
-    openai_client = _get_openai_client()
+    openai_client, model_name = _get_openai_client()
     token_log: dict = {}
 
     # Phase 1a: Extract FA (page-by-page via Azure DI)
@@ -468,7 +510,7 @@ async def run_pipeline(
 
     # Phase 1c: Generate structured ISI Blueprint
     print("\n[Phase 1] Generating ISI Blueprint via gpt-4o...")
-    blueprint = await generate_isi_blueprint(openai_client, isi_text, token_log)
+    blueprint = await generate_isi_blueprint(openai_client, isi_text, token_log, model=model_name)
     print(
         f"  Drug: {blueprint.drug_name} | Audience: {blueprint.audience} | "
         f"Sections: {len(blueprint.sections)}"
@@ -476,8 +518,9 @@ async def run_pipeline(
 
     # Phase 2: Async page-by-page extraction + deduplication
     print(f"\n[Phase 2] Extracting ISI fragments from {len(fa_pages)} FA pages (async)...")
-    page_results = await extract_all_fa_pages(openai_client, fa_pages, blueprint, token_log)
-    fa_section_map = deduplicate_fragments(page_results)
+    page_results = await extract_all_fa_pages(openai_client, fa_pages, blueprint, token_log, model=model_name)
+    canonical_titles = [s.title for s in blueprint.sections]
+    fa_section_map = deduplicate_fragments(page_results, canonical_titles=canonical_titles)
     total_frags = sum(len(v) for v in fa_section_map.values())
     print(f"  {total_frags} unique fragments across {len(fa_section_map)} sections")
 
