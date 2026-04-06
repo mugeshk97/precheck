@@ -90,7 +90,7 @@ def extract_text_from_pdf_pages(client: DocumentIntelligenceClient, file_path: s
 
 def extract_text_from_docx(file_path: str) -> str:
     doc = Document(file_path)
-    return "\n".join(para.text for para in doc.paragraphs if para.text.strip())
+    return "\n\n".join(para.text for para in doc.paragraphs if para.text.strip())
 
 
 # ── Text cleaning & normalization ──────────────────────────────────────────────
@@ -166,8 +166,12 @@ async def generate_isi_blueprint(
                     "role": "system",
                     "content": (
                         "You are a pharmaceutical regulatory expert. "
-                        "Parse the given ISI document into structured sections, "
-                        "preserving the exact verbatim content of each section."
+                        "Parse the given ISI document into structured sections. "
+                        "CRITICAL RULES:\n"
+                        "- DO NOT summarize, paraphrase, or condense any text.\n"
+                        "- Preserve the EXACT wording, casing, and punctuation of every section.\n"
+                        "- Every word from the source document must appear in exactly one section's content.\n"
+                        "- If unsure which section a sentence belongs to, include it in the nearest preceding section."
                     ),
                 },
                 {
@@ -459,7 +463,7 @@ def _get_openai_client() -> tuple[AsyncOpenAI | AsyncAzureOpenAI, str]:
     """
     api_key = os.getenv("OPENAI_API_KEY")
     if api_key:
-        return AsyncOpenAI(api_key=api_key), "gpt-4o-mini"
+        return AsyncOpenAI(api_key=api_key), "o3-mini"
 
     azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
     if azure_endpoint:
@@ -467,7 +471,7 @@ def _get_openai_client() -> tuple[AsyncOpenAI | AsyncAzureOpenAI, str]:
         token_provider = get_bearer_token_provider(
             credential, "https://cognitiveservices.azure.com/.default"
         )
-        deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")
+        deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "o3-mini")
         client = AsyncAzureOpenAI(
             azure_endpoint=azure_endpoint,
             azure_ad_token_provider=token_provider,
