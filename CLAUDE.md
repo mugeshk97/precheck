@@ -19,6 +19,14 @@ uv run python v2.py path/to/fa.pdf           # Custom FA, auto-selects ISI
 uv run python v2.py path/to/fa.pdf isi.docx  # Explicit FA + ISI pair
 ```
 
+Pass `debug=True` to `run_pipeline()` (or set it in `__main__`) to print per-section Coverage/Authenticity/F1 during Phase 3.
+
+## Directory conventions
+
+- `isi/` — ISI ground-truth `.docx` files (Phase 0 auto-discovery scans here)
+- `finalassets/` — FA `.pdf` files to audit
+- Audit outputs (`audit_*.json`, `audit_*.csv`) are written to the working directory
+
 ## Configuration
 
 `.env` must define:
@@ -34,7 +42,7 @@ For LLM calls (Blueprint + extraction), one of:
 A 4-phase compliance pipeline (`v2.py`) that checks whether a pharmaceutical Final Asset (FA) PDF correctly reproduces its Important Safety Information (ISI).
 
 ### Phase 0 — Auto-discovery
-`auto_select_isi()` scores every `isi/*.docx` against the first 4000 chars of FA text using `rapidfuzz.fuzz.token_set_ratio` and picks the highest-scoring file as Ground Truth. Skipped if an ISI path is passed explicitly.
+`auto_select_isi()` scores every `isi/*.docx` against the full FA text using `difflib.SequenceMatcher.ratio()` and picks the highest-scoring file as Ground Truth. Skipped if an ISI path is passed explicitly.
 
 ### Phase 1 — Extraction & Blueprint
 - **FA**: Azure AI Document Intelligence (`prebuilt-layout` model) extracts text page-by-page into `dict[int, str]`.

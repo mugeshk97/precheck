@@ -323,14 +323,15 @@ def deduplicate_fragments(
 
 # ── Phase 3: Section-wise scoring ─────────────────────────────────────────────
 
-def _best_sentence_scores(source: list[str], target: list[str]) -> list[float]:
-    scores = []
+def _best_sentence_scores(source: list[str], target: list[str]) -> list[tuple[str, float, str]]:
+    """Returns (source_sentence, best_score, best_target_sentence) for each qualifying source."""
+    results = []
     for src in source:
         if len(src.split()) < 4:
             continue
-        score = max(fuzz.token_set_ratio(src, tgt) for tgt in target)
-        scores.append(score)
-    return scores
+        best_tgt = max(target, key=lambda tgt: fuzz.token_set_ratio(src, tgt))
+        results.append((src, float(fuzz.token_set_ratio(src, best_tgt)), best_tgt))
+    return results
 
 
 def score_section(
@@ -348,17 +349,21 @@ def score_section(
             "f1": 0.0,
             "isi_sentence_count": len(isi_sents),
             "fa_fragment_count": len(fa_sents),
+            "coverage_trace": [],
+            "authenticity_trace": [],
         }
 
     # Coverage: ISI → FA (penalise weak matches)
-    cov_scores = _best_sentence_scores(isi_sents, fa_sents)
-    calibrated = [s if s >= threshold else s * 0.6 for s in cov_scores]
+    cov_results = _best_sentence_scores(isi_sents, fa_sents)
+    calibrated = [s if s >= threshold else s * 0.6 for _, s, _ in cov_results]
     coverage = round(mean(calibrated), 2) if calibrated else 0.0
+    coverage_trace = [{"source": src, "target": tgt, "score": s} for src, s, tgt in cov_results]
 
     # Authenticity: FA → ISI (only count confident matches)
-    auth_scores = _best_sentence_scores(fa_sents, isi_sents)
-    valid_auth = [s for s in auth_scores if s >= threshold]
+    auth_results = _best_sentence_scores(fa_sents, isi_sents)
+    valid_auth = [s for _, s, _ in auth_results if s >= threshold]
     authenticity = round(mean(valid_auth), 2) if valid_auth else 0.0
+    authenticity_trace = [{"source": src, "target": tgt, "score": s} for src, s, tgt in auth_results]
 
     f1 = (
         round(2 * coverage * authenticity / (coverage + authenticity), 2)
@@ -371,6 +376,8 @@ def score_section(
         "f1": f1,
         "isi_sentence_count": len(isi_sents),
         "fa_fragment_count": len(fa_sents),
+        "coverage_trace": coverage_trace,
+        "authenticity_trace": authenticity_trace,
     }
 
 
@@ -408,9 +415,14 @@ def build_audit_report(
         "sections": [
             {
                 "title": sec.title,
-                "scores": section_scores.get(
-                    sec.title, {"coverage": 0.0, "authenticity": 0.0, "f1": 0.0}
-                ),
+                "scores": {
+                    k: v for k, v in section_scores.get(
+                        sec.title, {"coverage": 0.0, "authenticity": 0.0, "f1": 0.0}
+                    ).items()
+                    if k not in ("coverage_trace", "authenticity_trace")
+                },
+                "coverage_trace": section_scores.get(sec.title, {}).get("coverage_trace", []),
+                "authenticity_trace": section_scores.get(sec.title, {}).get("authenticity_trace", []),
                 "fa_fragments": fa_section_map.get(sec.title, []),
             }
             for sec in blueprint.sections
@@ -536,6 +548,15 @@ async def run_pipeline(
     total_frags = sum(len(v) for v in fa_section_map.values())
     print(f"  {total_frags} unique fragments across {len(fa_section_map)} sections")
 
+    if debug:
+        ts_raw = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        stem_raw = Path(fa_path).stem[:40]
+        raw_path = Path(".") / f"audit_{stem_raw}_{ts_raw}_raw_pages.json"
+        raw_dump = {str(pnum): frags.model_dump() for pnum, frags in page_results}
+        with open(raw_path, "w") as f:
+            json.dump(raw_dump, f, indent=2)
+        print(f"  Raw pages → {raw_path.name}")
+
     # Phase 3: Section-wise scoring
     print("\n[Phase 3] Scoring sections...")
     section_scores: dict[str, dict] = {}
@@ -550,6 +571,9 @@ async def run_pipeline(
                 f"Auth={scores['authenticity']:5.1f}  "
                 f"F1={scores['f1']:5.1f}"
             )
+            for entry in scores.get("coverage_trace", []):
+                if entry["score"] < 75:
+                    print(f"      └─ Missing: \"{entry['source'][:80]}\" (Best match: {entry['score']:.0f})")
 
     # Phase 4: Audit report
     print("\n[Phase 4] Saving audit report...")
