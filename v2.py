@@ -202,7 +202,7 @@ async def _extract_page_fragments(
     client: AsyncOpenAI | AsyncAzureOpenAI,
     page_num: int,
     page_text: str,
-    section_titles: list[str],
+    section_info: list[dict],
     token_log: dict,
     model: str = "gpt-4o-mini",
 ) -> tuple[int, FAPageFragments]:
@@ -222,16 +222,18 @@ async def _extract_page_fragments(
                     "role": "system",
                     "content": (
                         "You are a pharmaceutical compliance analyst. "
-                        "Given a page from a Final Asset (FA) marketing material and a list of ISI section titles, "
+                        "Given a page from a Final Asset (FA) marketing material and a list of ISI sections "
+                        "(each with a title and associated keywords), "
                         "extract any text that appears to be ISI safety information. "
-                        "Group fragments by the closest matching ISI section. "
+                        "Use the keywords to help identify which section each fragment belongs to. "
+                        "Group fragments by the closest matching ISI section title. "
                         "If nothing on this page looks like ISI content, return empty extractions."
                     ),
                 },
                 {
                     "role": "user",
                     "content": (
-                        f"ISI Sections: {json.dumps(section_titles)}\n\n"
+                        f"ISI Sections:\n{json.dumps(section_info, indent=2)}\n\n"
                         f"FA Page {page_num}:\n{page_text}"
                     ),
                 },
@@ -256,9 +258,12 @@ async def extract_all_fa_pages(
     model: str = "gpt-4o-mini",
 ) -> list[tuple[int, FAPageFragments]]:
     """Concurrently process all non-empty FA pages."""
-    section_titles = [s.title for s in blueprint.sections]
+    section_info = [
+        {"title": s.title, "keywords": s.keywords}
+        for s in blueprint.sections
+    ]
     tasks = [
-        _extract_page_fragments(client, pnum, ptext, section_titles, token_log, model)
+        _extract_page_fragments(client, pnum, ptext, section_info, token_log, model)
         for pnum, ptext in pages.items()
         if ptext.strip()
     ]
