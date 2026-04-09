@@ -4,3 +4,5 @@
 finalassets
 isi
 __pycache__
+
+*.txt

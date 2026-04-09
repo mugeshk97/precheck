@@ -14,10 +14,14 @@ uv add <package>                                     # Add a dependency
 ## Running the pipeline
 
 ```bash
-uv run python v2.py                          # Default FA, auto-selects ISI
+uv run python v2.py                          # Default FA (hardcoded in __main__), auto-selects ISI
 uv run python v2.py path/to/fa.pdf           # Custom FA, auto-selects ISI
 uv run python v2.py path/to/fa.pdf isi.docx  # Explicit FA + ISI pair
 ```
+
+Input files live in `finalassets/` (PDFs) and `isi/` (`.docx` files). Pass `debug=True` to `run_pipeline()` to print per-section Coverage/Authenticity/F1 scores during Phase 3.
+
+There are no automated tests in this repository.
 
 ## Configuration
 
@@ -39,7 +43,7 @@ A 4-phase compliance pipeline (`v2.py`) that checks whether a pharmaceutical Fin
 ### Phase 1 — Extraction & Blueprint
 - **FA**: Azure AI Document Intelligence (`prebuilt-layout` model) extracts text page-by-page into `dict[int, str]`.
 - **ISI**: `python-docx` extracts the `.docx` as plain text.
-- **Blueprint**: ISI text is sent once to the configured LLM with a strict Pydantic `response_format=ISIBlueprint`. Returns drug name, audience, and a list of `ISISection` objects each containing `title`, `keywords`, and verbatim `content`.
+- **Blueprint**: ISI text is sent once to the configured LLM (default model: `o3-mini`) with a strict Pydantic `response_format=ISIBlueprint`. Returns drug name, audience, and a list of `ISISection` objects each containing `title`, `keywords`, and verbatim `content`.
 
 ### Phase 2 — Async extraction & deduplication
 `asyncio.gather` fires one LLM call per FA page concurrently. Each call returns `FAPageFragments`: ISI-like sentences grouped by section title. Every LLM call is wrapped in `@retry` (tenacity, exponential backoff, 4 attempts). `deduplicate_fragments()` then:
@@ -69,6 +73,6 @@ Text normalization before scoring: NFKC Unicode, hyphenated line-break repair (`
 
 ### Notes
 - Sentence splitting uses NLTK `sent_tokenize` with a regex fallback (`(?<=[.!?])\s+`) if punkt data is unavailable.
-- `langchain*` packages in `pyproject.toml` are unused leftovers from earlier experiments.
-- `_get_openai_client()` returns `(client, model_name)`. If `OPENAI_API_KEY` is set it returns `AsyncOpenAI`; otherwise it builds `AsyncAzureOpenAI` using `ManagedIdentityCredential` + `get_bearer_token_provider`. The `model_name` (or Azure deployment name) is threaded through `generate_isi_blueprint` → `extract_all_fa_pages` → `_extract_page_fragments` via a `model=` parameter.
+- `langchain*` and `spacy` packages in `pyproject.toml` are unused leftovers from earlier experiments.
+- `_get_openai_client()` returns `(client, model_name)`. If `OPENAI_API_KEY` is set it returns `AsyncOpenAI` with model `"o3-mini"`; otherwise it builds `AsyncAzureOpenAI` using `ManagedIdentityCredential` + `get_bearer_token_provider` with deployment from `AZURE_OPENAI_DEPLOYMENT` (defaults to `"o3-mini"`). The `model_name` is threaded through `generate_isi_blueprint` → `extract_all_fa_pages` → `_extract_page_fragments` via a `model=` parameter. Note: individual function signatures still show `gpt-4o-mini` as a default but this is always overridden at the call site.
 - The `token_log` dict is mutated in-place and shared across all async calls; additions use `+=` with `setdefault` to avoid overwrites on the FA extraction counts.
