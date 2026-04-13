@@ -13,6 +13,7 @@ import csv
 import json
 import os
 import re
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -55,7 +56,7 @@ def extract_text_from_pdf_pages(
     page_texts: dict[int, str] = {}
     for page_index, page in enumerate(result.pages):
         lines = [line.content for line in (page.lines or [])]
-        page_texts[page_index + 1] = "\n".join(lines)
+        page_texts[page_index + 1] = clean_page_text("\n".join(lines))
     return page_texts
 
 
@@ -66,12 +67,31 @@ def extract_text_from_docx(docx_path: str) -> str:
 
 # ── Text cleaning ─────────────────────────────────────────────────────────────
 
-def clean_markdown(text: str) -> str:
-    text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"!\[.*?\]\(.*?\)", "", text)
-    text = re.sub(r"^#{1,6}\s+.*$", "", text, flags=re.MULTILINE)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+_BULLET_RE   = re.compile(r"[\u00b7\u2022\u2023\u25cf\u25aa\u25ab\uf0b7\u2043\u204c\u204d]")
+_HYPHEN_LB   = re.compile(r"-\n")          # "contra-\nindication" → "contraindication"
+_NBSP        = re.compile(r"\xa0")
+_MULTI_SPACE = re.compile(r"[ \t]+")
+_MULTI_NL    = re.compile(r"\n{3,}")
+_PAGE_NUM    = re.compile(r"^\s*\d{1,4}\s*$")   # lone page numbers
+
+
+def clean_page_text(text: str) -> str:
+    """Clean raw Azure DI page text before passing to the LLM.
+
+    Preserves line breaks (needed for sentence context) but removes noise:
+    bullet artifacts, ligatures, hyphenated line-breaks, lone page numbers,
+    and excessive whitespace. Does NOT lowercase — the LLM needs original casing.
+    """
+    text = unicodedata.normalize("NFKC", text)   # ligatures, full-width chars, etc.
+    text = _HYPHEN_LB.sub("", text)              # re-join hyphenated words
+    text = _NBSP.sub(" ", text)
+    text = _BULLET_RE.sub(" ", text)
+    lines = [
+        _MULTI_SPACE.sub(" ", line).strip()
+        for line in text.splitlines()
+        if not _PAGE_NUM.match(line) and len(line.strip()) > 2
+    ]
+    return _MULTI_NL.sub("\n\n", "\n".join(lines)).strip()
 
 
 # ── Phase 0: Auto-discovery ────────────────────────────────────────────────────
@@ -350,7 +370,7 @@ async def run_pipeline(
     # Phase 1a: Extract FA text page-by-page via Azure Document Intelligence
     print(f"\n[Phase 1] Extracting FA: {Path(fa_path).name}")
     fa_page_texts = extract_text_from_pdf_pages(azure_client, fa_path)
-    fa_full_text = clean_markdown("\n".join(fa_page_texts.values()))
+    fa_full_text = "\n".join(fa_page_texts.values())  # already cleaned per-page
 
     # Phase 0: Auto-select ISI if not provided
     if isi_path is None:
@@ -385,7 +405,7 @@ async def run_pipeline(
 
     # Phase 3: Section-wise scoring
     print("\n[Phase 3] Scoring sections...")
-    comparison_result = SectionScorer().compare(blueprint, page_results)
+    comparison_result = SectionScorer().compare(blueprint, page_results, fa_page_texts)
     if debug:
         for section in comparison_result["sections"]:
             print(
