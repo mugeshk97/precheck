@@ -278,7 +278,7 @@ class SectionScorer:
                     lines.append(f"\n    Score: {score:.1f}")
                     lines.append(f"    ISI: \"{sent}\"")
                     lines.append(f"    FA:  \"{fa_match}\"")
-                    lines.append(f"    Diff:")
+                    lines.append("    Diff:")
                     for d in diff:
                         lines.append(f"      {d}")
 
@@ -321,7 +321,7 @@ class SectionScorer:
                     lines.append(f"\n    Score: {score:.1f} | Page: {page}")
                     lines.append(f"    FA fragment: \"{frag}\"")
                     lines.append(f"    ISI match:   \"{isi_match}\"")
-                    lines.append(f"    Diff (ISI → FA):")
+                    lines.append("    Diff (ISI → FA):")
                     for d in diff:
                         lines.append(f"      {d}")
 
