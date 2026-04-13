@@ -46,9 +46,8 @@ def extract_text_from_pdf_pages(
     """Return {page_number: raw_text} for every page in the FA PDF."""
     with open(fa_path, "rb") as pdf_file:
         poller = azure_client.begin_analyze_document(
-            "prebuilt-layout",
+            "prebuilt-read",
             AnalyzeDocumentRequest(bytes_source=pdf_file.read()),
-            output_content_format="markdown",
         )
     result = poller.result()
     print(f"  Pages extracted: {len(result.pages)}")
