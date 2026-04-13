@@ -182,8 +182,7 @@ class SectionScorer:
             if len(fa_sentence.split()) < MIN_WORDS:
                 continue
             best_match_score = max(_similarity_score(fa_sentence, isi_sentence) for isi_sentence in isi_sentences)
-            if best_match_score >= threshold:
-                authenticity_scores.append(best_match_score)
+            authenticity_scores.append(best_match_score if best_match_score >= threshold else best_match_score * PENALTY)
 
         authenticity = round(mean(authenticity_scores), 2) if authenticity_scores else 0.0
 
