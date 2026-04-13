@@ -408,19 +408,13 @@ async def run_pipeline(
     comparison_result = SectionScorer().compare(blueprint, page_results, fa_page_texts)
     if debug:
         for section in comparison_result["sections"]:
-            cov, auth, f1 = section["coverage"], section["authenticity"], section["f1"]
-            flag = " ✗" if f1 < 75 else ""
             print(
                 f"  [{section['title'][:50]:<50}] "
-                f"Cov={cov:5.1f}  Auth={auth:5.1f}  F1={f1:5.1f}{flag}"
+                f"Cov={section['coverage']:5.1f}  "
+                f"Auth={section['authenticity']:5.1f}  "
+                f"F1={section['f1']:5.1f}  "
+                f"Mismatches={len(section['mismatches'])}"
             )
-            if f1 < 75 and section["mismatches"]:
-                print(f"    {'─' * 60}")
-                for m in section["mismatches"]:
-                    print(f"    score={m['score']:4.1f}  page={m['closest_fa_page']}")
-                    print(f"      {m['diff'].splitlines()[0]}")   # - isi sentence
-                    print(f"      {m['diff'].splitlines()[1]}")   # + fa sentence
-                print(f"    {'─' * 60}")
 
     # Phase 4: Audit report
     print("\n[Phase 4] Saving audit report...")
