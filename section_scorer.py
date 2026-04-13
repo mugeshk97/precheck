@@ -118,11 +118,18 @@ class SectionScorer:
             )
 
         isi_full = " ".join(isi_sentences)
-        fa_extracted = " ".join(fa_texts)
 
-        coverage     = float(fuzz.partial_ratio(isi_full, fa_raw_text))
-        authenticity = float(fuzz.partial_ratio(fa_extracted, isi_full)) if fa_extracted.strip() else 0.0
-        f1           = round(2 * coverage * authenticity / (coverage + authenticity), 2) if (coverage + authenticity) else 0.0
+        coverage = float(fuzz.partial_ratio(isi_full, fa_raw_text))
+
+        # Fragment-wise authenticity: score each FA fragment individually against ISI section
+        scorable_frags = [t for t in fa_texts if len(t.split()) >= MIN_WORDS]
+        if scorable_frags:
+            frag_scores = [float(fuzz.partial_ratio(f, isi_full)) for f in scorable_frags]
+            authenticity = round(sum(frag_scores) / len(frag_scores), 2)
+        else:
+            authenticity = 0.0
+
+        f1 = round(2 * coverage * authenticity / (coverage + authenticity), 2) if (coverage + authenticity) else 0.0
 
         mismatches = []
         for sent in isi_sentences:
@@ -176,11 +183,23 @@ class SectionScorer:
         else:
             overall_cov = 0.0
 
-        # Overall authenticity: still section-averaged over active sections
-        active = [r for r in results if r.fa_fragment_count > 0]
-        auth   = [r.authenticity for r in active]
-        overall_auth = round(sum(auth) / len(auth), 2) if auth else 0.0
-        overall_f1   = round(2 * overall_cov * overall_auth / (overall_cov + overall_auth), 2) if (overall_cov + overall_auth) else 0.0
+        # Overall authenticity: fragment-wise FA → full ISI matching.
+        # Each FA fragment is scored against the full ISI text (not section-scoped),
+        # so fragments assigned to the wrong section still get credit.
+        isi_full_text = _prepare(" ".join(sec.content for sec in blueprint.sections))
+        all_fa_frags = [
+            normalize_text(frag)
+            for entries in section_map.values()
+            for frag, _ in entries
+            if len(normalize_text(frag).split()) >= MIN_WORDS
+        ]
+        if all_fa_frags:
+            frag_auth_scores = [float(fuzz.partial_ratio(f, isi_full_text)) for f in all_fa_frags]
+            overall_auth = round(sum(frag_auth_scores) / len(frag_auth_scores), 2)
+        else:
+            overall_auth = 0.0
+
+        overall_f1 = round(2 * overall_cov * overall_auth / (overall_cov + overall_auth), 2) if (overall_cov + overall_auth) else 0.0
 
         return {
             "match_category": "Closest Match" if overall_cov >= self.match_threshold else "Not Matched",
@@ -192,6 +211,9 @@ class SectionScorer:
                 "sent_scores": [float(fuzz.partial_ratio(s, fa_raw_text)) for s in all_isi_sentences] if all_isi_sentences else [],
                 "section_map": section_map,
                 "fa_raw_text": fa_raw_text,
+                "isi_full_text": isi_full_text,
+                "all_fa_frags": all_fa_frags,
+                "frag_auth_scores": frag_auth_scores if all_fa_frags else [],
             },
         }
 
@@ -270,21 +292,24 @@ class SectionScorer:
         lines.append("AUTHENTICITY GAPS — FA fragments that don't trace back to the ISI")
         lines.append(f"{'─' * 80}")
 
+        isi_full_text = debug_data.get("isi_full_text", "")
         total_auth_gaps = 0
+        total_auth_frags = 0
         for section in blueprint.sections:
             fa_entries = section_map.get(section.title, [])
             if not fa_entries:
                 continue
 
-            isi_full = normalize_text(section.content)
             sec_auth_gaps = []
             for frag_text, page_num in fa_entries:
                 frag_norm = normalize_text(frag_text)
-                if not frag_norm.strip():
+                if not frag_norm.strip() or len(frag_norm.split()) < MIN_WORDS:
                     continue
-                score = float(fuzz.partial_ratio(frag_norm, isi_full))
+                total_auth_frags += 1
+                # Score against full ISI text (matches overall scoring)
+                score = float(fuzz.partial_ratio(frag_norm, isi_full_text))
                 if score < 100.0:
-                    best_isi_match = self._find_best_match(frag_norm, isi_full)
+                    best_isi_match = self._find_best_match(frag_norm, isi_full_text)
                     diff = _word_diff(best_isi_match, frag_norm)
                     sec_auth_gaps.append((frag_text, page_num, best_isi_match, score, diff))
 
@@ -302,6 +327,8 @@ class SectionScorer:
 
         if total_auth_gaps == 0:
             lines.append("\n  No authenticity gaps — all FA fragments trace back to ISI.")
+        else:
+            lines.append(f"\n  Total authenticity gaps: {total_auth_gaps} / {total_auth_frags} fragments")
 
         # ── Per-section summary table ────────────────────────────────────────
         lines.append(f"\n{'─' * 80}")
