@@ -7,6 +7,7 @@ Authenticity (FA extracted ISI → ISI)   : does the extracted content trace bac
 Both use rapidfuzz.fuzz.partial_ratio — best-window match, clean + sentence-tokenized.
 """
 
+import difflib
 import hashlib
 import logging
 from dataclasses import asdict, dataclass
@@ -185,4 +186,187 @@ class SectionScorer:
             "match_category": "Closest Match" if overall_cov >= self.match_threshold else "Not Matched",
             "overall": {"coverage": overall_cov, "authenticity": overall_auth, "f1": overall_f1},
             "sections": [asdict(r) for r in results],
+            # Keep raw data for debug report generation
+            "_debug_data": {
+                "all_isi_sentences": all_isi_sentences,
+                "sent_scores": [float(fuzz.partial_ratio(s, fa_raw_text)) for s in all_isi_sentences] if all_isi_sentences else [],
+                "section_map": section_map,
+                "fa_raw_text": fa_raw_text,
+            },
         }
+
+    def generate_debug_report(
+        self,
+        blueprint: ISIBlueprint,
+        comparison_result: dict,
+    ) -> str:
+        """Generate a human-readable debug report explaining score gaps.
+
+        Shows:
+        - Coverage gaps: ISI sentences not fully found in the FA, with word-level diffs
+        - Authenticity gaps: FA fragments that don't trace back cleanly to the ISI
+        """
+        debug_data = comparison_result.get("_debug_data", {})
+        fa_raw_text = debug_data.get("fa_raw_text", "")
+        section_map = debug_data.get("section_map", {})
+        all_isi_sentences = debug_data.get("all_isi_sentences", [])
+        sent_scores = debug_data.get("sent_scores", [])
+
+        lines: list[str] = []
+        lines.append("=" * 80)
+        lines.append("DEBUG REPORT — Score Gap Analysis")
+        lines.append("=" * 80)
+
+        overall = comparison_result.get("overall", {})
+        lines.append(f"\nOverall Coverage:     {overall.get('coverage', 0):.1f}")
+        lines.append(f"Overall Authenticity: {overall.get('authenticity', 0):.1f}")
+        lines.append(f"Overall F1:           {overall.get('f1', 0):.1f}")
+        lines.append(f"Match Category:       {comparison_result.get('match_category', '?')}")
+
+        # ── Coverage Gaps (ISI → FA) ─────────────────────────────────────────
+        lines.append(f"\n{'─' * 80}")
+        lines.append("COVERAGE GAPS — ISI sentences not fully found in the FA")
+        lines.append(f"{'─' * 80}")
+
+        # Group sentences by section for readability
+        sentence_idx = 0
+        total_gaps = 0
+        for section in blueprint.sections:
+            sec_sentences = [
+                normalize_text(s)
+                for s in _split_sentences(section.content)
+                if len(normalize_text(s).split()) >= MIN_WORDS
+            ]
+            sec_gaps = []
+            for sent in sec_sentences:
+                if sentence_idx < len(sent_scores):
+                    score = sent_scores[sentence_idx]
+                    if score < 100.0:
+                        # Find the best matching window in FA text
+                        best_fa_match = self._find_best_match(sent, fa_raw_text)
+                        diff = _word_diff(sent, best_fa_match)
+                        sec_gaps.append((sent, best_fa_match, score, diff))
+                    sentence_idx += 1
+
+            if sec_gaps:
+                total_gaps += len(sec_gaps)
+                lines.append(f"\n  Section: {section.title}")
+                lines.append(f"  Gaps: {len(sec_gaps)} / {len(sec_sentences)} sentences")
+                for sent, fa_match, score, diff in sec_gaps:
+                    lines.append(f"\n    Score: {score:.1f}")
+                    lines.append(f"    ISI: \"{sent}\"")
+                    lines.append(f"    FA:  \"{fa_match}\"")
+                    lines.append(f"    Diff:")
+                    for d in diff:
+                        lines.append(f"      {d}")
+
+        if total_gaps == 0:
+            lines.append("\n  No coverage gaps — all ISI sentences found in FA.")
+        else:
+            lines.append(f"\n  Total coverage gaps: {total_gaps} / {len(all_isi_sentences)} sentences")
+
+        # ── Authenticity Gaps (FA → ISI) ─────────────────────────────────────
+        lines.append(f"\n{'─' * 80}")
+        lines.append("AUTHENTICITY GAPS — FA fragments that don't trace back to the ISI")
+        lines.append(f"{'─' * 80}")
+
+        total_auth_gaps = 0
+        for section in blueprint.sections:
+            fa_entries = section_map.get(section.title, [])
+            if not fa_entries:
+                continue
+
+            isi_full = normalize_text(section.content)
+            sec_auth_gaps = []
+            for frag_text, page_num in fa_entries:
+                frag_norm = normalize_text(frag_text)
+                if not frag_norm.strip():
+                    continue
+                score = float(fuzz.partial_ratio(frag_norm, isi_full))
+                if score < 100.0:
+                    best_isi_match = self._find_best_match(frag_norm, isi_full)
+                    diff = _word_diff(best_isi_match, frag_norm)
+                    sec_auth_gaps.append((frag_text, page_num, best_isi_match, score, diff))
+
+            if sec_auth_gaps:
+                total_auth_gaps += len(sec_auth_gaps)
+                lines.append(f"\n  Section: {section.title}")
+                lines.append(f"  Gaps: {len(sec_auth_gaps)} / {len(fa_entries)} fragments")
+                for frag, page, isi_match, score, diff in sec_auth_gaps:
+                    lines.append(f"\n    Score: {score:.1f} | Page: {page}")
+                    lines.append(f"    FA fragment: \"{frag}\"")
+                    lines.append(f"    ISI match:   \"{isi_match}\"")
+                    lines.append(f"    Diff (ISI → FA):")
+                    for d in diff:
+                        lines.append(f"      {d}")
+
+        if total_auth_gaps == 0:
+            lines.append("\n  No authenticity gaps — all FA fragments trace back to ISI.")
+
+        # ── Per-section summary table ────────────────────────────────────────
+        lines.append(f"\n{'─' * 80}")
+        lines.append("SECTION SUMMARY")
+        lines.append(f"{'─' * 80}")
+        lines.append(f"\n  {'Section':<50} {'Cov':>5} {'Auth':>5} {'F1':>5} {'ISI#':>5} {'FA#':>5} {'Gaps':>5}")
+        lines.append(f"  {'─' * 80}")
+        for sec in comparison_result.get("sections", []):
+            lines.append(
+                f"  {sec['title'][:50]:<50} "
+                f"{sec['coverage']:5.1f} {sec['authenticity']:5.1f} {sec['f1']:5.1f} "
+                f"{sec['isi_sentence_count']:5d} {sec['fa_fragment_count']:5d} "
+                f"{len(sec['mismatches']):5d}"
+            )
+
+        lines.append(f"\n{'=' * 80}")
+        return "\n".join(lines)
+
+    def _find_best_match(self, query: str, text: str, window_words: int = 0) -> str:
+        """Find the best matching substring in text for the query using sliding window."""
+        query_words = query.split()
+        text_words = text.split()
+        if not text_words or not query_words:
+            return ""
+
+        win = window_words or max(len(query_words), 8)
+        best_score = -1.0
+        best_window = ""
+
+        for i in range(max(1, len(text_words) - win + 1)):
+            window = " ".join(text_words[i : i + win])
+            score = fuzz.partial_ratio(query, window)
+            if score > best_score:
+                best_score = score
+                best_window = window
+            if score == 100.0:
+                break
+
+        return best_window
+
+
+def _word_diff(expected: str, actual: str) -> list[str]:
+    """Produce a human-readable word-level diff between two strings.
+
+    Returns lines like:
+      MISSING: "strong"         (in ISI but not in FA)
+      ADDED:   "moderate"       (in FA but not in ISI)
+      CHANGED: "inhibitors" → "inhibitor"
+    """
+    exp_words = expected.split()
+    act_words = actual.split()
+    sm = difflib.SequenceMatcher(None, exp_words, act_words)
+
+    result: list[str] = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        elif tag == "delete":
+            missing = " ".join(exp_words[i1:i2])
+            result.append(f"MISSING: \"{missing}\"")
+        elif tag == "insert":
+            added = " ".join(act_words[j1:j2])
+            result.append(f"ADDED:   \"{added}\"")
+        elif tag == "replace":
+            old = " ".join(exp_words[i1:i2])
+            new = " ".join(act_words[j1:j2])
+            result.append(f"CHANGED: \"{old}\" → \"{new}\"")
+    return result if result else ["(no word-level differences detected)"]

@@ -432,7 +432,8 @@ async def run_pipeline(
 
     # Phase 3: Section-wise scoring
     print("\n[Phase 3] Scoring sections...")
-    comparison_result = SectionScorer().compare(blueprint, page_results, fa_page_texts)
+    scorer = SectionScorer()
+    comparison_result = scorer.compare(blueprint, page_results, fa_page_texts)
     if debug:
         for section in comparison_result["sections"]:
             print(
@@ -442,6 +443,18 @@ async def run_pipeline(
                 f"F1={section['f1']:5.1f}  "
                 f"Mismatches={len(section['mismatches'])}"
             )
+
+        # Generate and save debug report
+        debug_report = scorer.generate_debug_report(blueprint, comparison_result)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        fa_stem = Path(fa_path).stem[:40]
+        debug_path = f"debug_{fa_stem}_{timestamp}.txt"
+        with open(debug_path, "w") as f:
+            f.write(debug_report)
+        print(f"\n  Debug report → {debug_path}")
+
+    # Strip internal debug data before audit report
+    comparison_result.pop("_debug_data", None)
 
     # Phase 4: Audit report
     print("\n[Phase 4] Saving audit report...")
