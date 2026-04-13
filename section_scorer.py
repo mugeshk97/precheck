@@ -160,16 +160,29 @@ class SectionScorer:
             for s in blueprint.sections
         ]
 
-        cov  = [r.coverage     for r in results]
-        auth = [r.authenticity for r in results]
-        overall_cov  = round(sum(cov)  / len(cov),  2) if cov  else 0.0
+        # Overall coverage: sentence-wise ISI → FA matching.
+        # Each ISI sentence is independently scored against the full FA text.
+        # This avoids dependence on how the LLM splits sections in the blueprint.
+        all_isi_sentences = [
+            normalize_text(s)
+            for sec in blueprint.sections
+            for s in _split_sentences(sec.content)
+            if len(normalize_text(s).split()) >= MIN_WORDS
+        ]
+        if all_isi_sentences:
+            sent_scores = [float(fuzz.partial_ratio(s, fa_raw_text)) for s in all_isi_sentences]
+            overall_cov = round(sum(sent_scores) / len(sent_scores), 2)
+        else:
+            overall_cov = 0.0
+
+        # Overall authenticity: still section-averaged over active sections
+        active = [r for r in results if r.fa_fragment_count > 0]
+        auth   = [r.authenticity for r in active]
         overall_auth = round(sum(auth) / len(auth), 2) if auth else 0.0
         overall_f1   = round(2 * overall_cov * overall_auth / (overall_cov + overall_auth), 2) if (overall_cov + overall_auth) else 0.0
 
-        has_missing = any(r.coverage == 0.0 and r.isi_sentence_count > 0 for r in results)
-
         return {
-            "match_category": "Closest Match" if overall_cov >= self.match_threshold and not has_missing else "Not Matched",
+            "match_category": "Closest Match" if overall_cov >= self.match_threshold else "Not Matched",
             "overall": {"coverage": overall_cov, "authenticity": overall_auth, "f1": overall_f1},
             "sections": [asdict(r) for r in results],
         }

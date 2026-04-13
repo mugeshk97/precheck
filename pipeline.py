@@ -33,7 +33,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from models import FAPageFragments, ISIBlueprint, normalize_text
+from models import FAPageFragments, ISIBlueprint, _split_sentences, normalize_text
 from section_scorer import SectionScorer
 
 load_dotenv()
@@ -96,40 +96,54 @@ def clean_page_text(text: str) -> str:
 
 # ── Phase 0: Auto-discovery ────────────────────────────────────────────────────
 
-def auto_select_isi(fa_full_text: str, isi_dir: str, fa_path: str = "") -> tuple[str, float]:
+MIN_AUTO_SELECT_SCORE = 60  # reject ISI matches below this confidence
+
+
+def auto_select_isi(fa_full_text: str, isi_dir: str, fa_path: str = "") -> tuple[str | None, float]:
     """Score every ISI .docx against the FA text; return (best_path, score).
 
-    Uses two overlapping word-based windows (words 0–600 and 50–650) so short
-    preambles (legal headers, cover pages) don't push drug-name content out of
-    the sample. Filename similarity is a 15% secondary signal — FA and ISI
-    filenames often share the drug name or indication.
+    Returns (None, score) when no candidate exceeds MIN_AUTO_SELECT_SCORE,
+    indicating the FA likely contains no ISI content.
+
+    Sentence-wise matching: splits each ISI into sentences, checks how many
+    appear in the FA via partial_ratio (best-window substring match). The
+    average of per-sentence scores gives a precise content overlap signal.
+    Filename similarity is a 10% secondary signal.
     """
     isi_files = list(Path(isi_dir).glob("*.docx"))
     if not isi_files:
         raise FileNotFoundError(f"No .docx files found in {isi_dir}")
 
-    fa_words = normalize_text(fa_full_text).split()
-    fa_windows = [
-        " ".join(fa_words[:600]),
-        " ".join(fa_words[50:650]),
-    ]
+    fa_norm = normalize_text(fa_full_text)
     fa_stem = normalize_text(Path(fa_path).stem) if fa_path else ""
 
     best_path, best_score = "", -1.0
 
     for candidate_path in isi_files:
         candidate_text = extract_text_from_docx(str(candidate_path))
-        candidate_sample = " ".join(normalize_text(candidate_text).split()[:600])
+        isi_sentences = [
+            normalize_text(s)
+            for s in _split_sentences(candidate_text)
+            if len(normalize_text(s).split()) >= 4
+        ]
 
-        content_score = max(fuzz.token_set_ratio(window, candidate_sample) for window in fa_windows)
+        if not isi_sentences:
+            continue
+
+        # Score each ISI sentence against the full FA text
+        sent_scores = [fuzz.partial_ratio(sent, fa_norm) for sent in isi_sentences]
+        content_score = sum(sent_scores) / len(sent_scores)
+
         filename_score = fuzz.token_set_ratio(fa_stem, normalize_text(candidate_path.stem)) if fa_stem else 0
-        combined = round(0.85 * content_score + 0.15 * filename_score, 1)
+        combined = round(0.90 * content_score + 0.10 * filename_score, 1)
 
-        print(f"    {candidate_path.name}: content={content_score:.0f}  file={filename_score:.0f}  score={combined}")
+        print(f"    {candidate_path.name}: content={content_score:.1f}  file={filename_score:.0f}  score={combined}")
         if combined > best_score:
             best_score = combined
             best_path = str(candidate_path)
 
+    if best_score < MIN_AUTO_SELECT_SCORE:
+        return None, best_score
     return best_path, best_score
 
 
@@ -376,6 +390,19 @@ async def run_pipeline(
     if isi_path is None:
         print(f"\n[Phase 0] Auto-selecting ISI from {isi_dir}/")
         isi_path, match_score = auto_select_isi(fa_full_text, isi_dir, fa_path=fa_path)
+        if isi_path is None:
+            print(f"  → No ISI matched (best score: {match_score:.0f}, threshold: {MIN_AUTO_SELECT_SCORE})")
+            return {
+                "fa": Path(fa_path).name,
+                "isi": None,
+                "match_category": "No ISI",
+                "overall": {"coverage": 0.0, "authenticity": 0.0, "f1": 0.0},
+                "sections": [],
+                "token_usage": {},
+                "drug": "Unknown",
+                "audience": "Unknown",
+                "run_at": datetime.now(timezone.utc).isoformat(),
+            }
         print(f"  → Selected: {Path(isi_path).name} (score: {match_score:.0f})")
 
     # Phase 1b: Extract ISI text from docx
