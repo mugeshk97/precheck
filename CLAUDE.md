@@ -14,9 +14,9 @@ uv add <package>                                     # Add a dependency
 ## Running the pipeline
 
 ```bash
-uv run python v2.py                          # Default FA (hardcoded in __main__), auto-selects ISI
-uv run python v2.py path/to/fa.pdf           # Custom FA, auto-selects ISI
-uv run python v2.py path/to/fa.pdf isi.docx  # Explicit FA + ISI pair
+uv run python pipeline.py                          # Default FA (hardcoded in __main__), auto-selects ISI
+uv run python pipeline.py path/to/fa.pdf           # Custom FA, auto-selects ISI
+uv run python pipeline.py path/to/fa.pdf isi.docx  # Explicit FA + ISI pair
 ```
 
 Input files live in `finalassets/` (PDFs) and `isi/` (`.docx` files). Pass `debug=True` to `run_pipeline()` to print per-section Coverage/Authenticity/F1 scores during Phase 3.
@@ -35,7 +35,12 @@ For LLM calls (Blueprint + extraction), one of:
 
 ## Architecture
 
-A 4-phase compliance pipeline (`v2.py`) that checks whether a pharmaceutical Final Asset (FA) PDF correctly reproduces its Important Safety Information (ISI).
+Two files make up the pipeline:
+- **`pipeline.py`** — 4-phase extraction pipeline (Azure DI + LLM + deduplication + audit output)
+- **`section_scorer.py`** — section-level scoring layer; call `SectionScorer().compare(blueprint, page_results)` after Phase 2
+
+### Pipeline (`pipeline.py`)
+A 4-phase compliance pipeline that checks whether a pharmaceutical Final Asset (FA) PDF correctly reproduces its Important Safety Information (ISI).
 
 ### Phase 0 — Auto-discovery
 `auto_select_isi()` scores every `isi/*.docx` against the first 4000 chars of FA text using `rapidfuzz.fuzz.token_set_ratio` and picks the highest-scoring file as Ground Truth. Skipped if an ISI path is passed explicitly.
@@ -73,6 +78,12 @@ Text normalization before scoring: NFKC Unicode, hyphenated line-break repair (`
 
 ### Notes
 - Sentence splitting uses NLTK `sent_tokenize` with a regex fallback (`(?<=[.!?])\s+`) if punkt data is unavailable.
-- `langchain*` and `spacy` packages in `pyproject.toml` are unused leftovers from earlier experiments.
-- `_get_openai_client()` returns `(client, model_name)`. If `OPENAI_API_KEY` is set it returns `AsyncOpenAI` with model `"o3-mini"`; otherwise it builds `AsyncAzureOpenAI` using `ManagedIdentityCredential` + `get_bearer_token_provider` with deployment from `AZURE_OPENAI_DEPLOYMENT` (defaults to `"o3-mini"`). The `model_name` is threaded through `generate_isi_blueprint` → `extract_all_fa_pages` → `_extract_page_fragments` via a `model=` parameter. Note: individual function signatures still show `gpt-4o-mini` as a default but this is always overridden at the call site.
+- `_get_openai_client()` returns `(client, model_name)`. If `OPENAI_API_KEY` is set it returns `AsyncOpenAI` with model `"o3-mini"`; otherwise it builds `AsyncAzureOpenAI` using `ManagedIdentityCredential` + `get_bearer_token_provider` with deployment from `AZURE_OPENAI_DEPLOYMENT` (defaults to `"o3-mini"`). The `model_name` is threaded through `generate_isi_blueprint` → `extract_all_fa_pages` → `_extract_page_fragments` via a `model=` parameter.
 - The `token_log` dict is mutated in-place and shared across all async calls; additions use `+=` with `setdefault` to avoid overwrites on the FA extraction counts.
+
+### Section Scorer (`section_scorer.py`)
+`SectionScorer.compare(blueprint, page_results)` takes the Phase 1 blueprint and Phase 2 page results and returns per-section Coverage / Authenticity / F1 scores with page-attributed fragments and word-level diffs for every low-coverage sentence.
+
+- **Scoring** — `difflib.SequenceMatcher` (order + spelling sensitive), scaled to 0–100
+- **Diffs** — `difflib.ndiff` word-level; `- word` = in ISI but wrong/missing in FA, `+ word` = what FA has instead
+- **Title resolution + dedup** — rapidfuzz (intentionally order-insensitive for title matching and repeated footer detection)
