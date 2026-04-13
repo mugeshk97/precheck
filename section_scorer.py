@@ -141,8 +141,17 @@ class SectionScorer:
         fa_entries: list[tuple[str, int]],
     ) -> SectionResult:
         isi_sentences = [normalize_text(s) for s in _split_sentences(isi_section.content)]
-        fa_sentences  = [normalize_text(text) for text, _ in fa_entries if text.strip()]
-        page_by_fragment = {normalize_text(text): page for text, page in fa_entries}
+        # Split FA fragments into sentences so SequenceMatcher compares same-sized units.
+        # A multi-sentence FA paragraph scored against a single ISI sentence produces a
+        # low ratio even when the sentence is fully present (2*M/T penalises length gap).
+        fa_sentence_page_pairs = [
+            (normalize_text(sentence), page)
+            for text, page in fa_entries
+            for sentence in _split_sentences(text)
+            if sentence.strip()
+        ]
+        fa_sentences      = [sent for sent, _ in fa_sentence_page_pairs]
+        page_by_fragment  = {sent: page for sent, page in fa_sentence_page_pairs}
 
         empty_result = SectionResult(
             title=isi_section.title,
