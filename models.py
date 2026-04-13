@@ -44,6 +44,7 @@ def normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     text = re.sub(r"-\n", "", text)     # "contra-\nindication" → "contraindication"
     text = re.sub(r"\xa0", " ", text)   # non-breaking spaces
+    text = re.sub(r"[\u00b7\u2022\u2023\u25cf\u25aa\u25ab\uf0b7\u2043\u204c\u204d]", " ", text)  # PDF bullet artifacts
     text = re.sub(r"\s+", " ", text)
     return text.strip().lower()
 
