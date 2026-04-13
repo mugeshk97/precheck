@@ -6,3 +6,4 @@ isi
 __pycache__
 
 *.txt
+.env
