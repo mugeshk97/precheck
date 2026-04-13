@@ -76,22 +76,38 @@ def clean_markdown(text: str) -> str:
 
 # ── Phase 0: Auto-discovery ────────────────────────────────────────────────────
 
-def auto_select_isi(fa_full_text: str, isi_dir: str) -> tuple[str, float]:
-    """Score every ISI .docx against the FA text; return (best_path, score)."""
+def auto_select_isi(fa_full_text: str, isi_dir: str, fa_path: str = "") -> tuple[str, float]:
+    """Score every ISI .docx against the FA text; return (best_path, score).
+
+    Uses two overlapping word-based windows (words 0–600 and 50–650) so short
+    preambles (legal headers, cover pages) don't push drug-name content out of
+    the sample. Filename similarity is a 15% secondary signal — FA and ISI
+    filenames often share the drug name or indication.
+    """
     isi_files = list(Path(isi_dir).glob("*.docx"))
     if not isi_files:
         raise FileNotFoundError(f"No .docx files found in {isi_dir}")
 
-    fa_sample = normalize_text(fa_full_text[:4000])
+    fa_words = normalize_text(fa_full_text).split()
+    fa_windows = [
+        " ".join(fa_words[:600]),
+        " ".join(fa_words[50:650]),
+    ]
+    fa_stem = normalize_text(Path(fa_path).stem) if fa_path else ""
+
     best_path, best_score = "", -1.0
 
     for candidate_path in isi_files:
         candidate_text = extract_text_from_docx(str(candidate_path))
-        candidate_sample = normalize_text(candidate_text[:4000])
-        match_score = fuzz.token_set_ratio(fa_sample, candidate_sample)
-        print(f"    {candidate_path.name}: {match_score:.0f}")
-        if match_score > best_score:
-            best_score = match_score
+        candidate_sample = " ".join(normalize_text(candidate_text).split()[:600])
+
+        content_score = max(fuzz.token_set_ratio(window, candidate_sample) for window in fa_windows)
+        filename_score = fuzz.token_set_ratio(fa_stem, normalize_text(candidate_path.stem)) if fa_stem else 0
+        combined = round(0.85 * content_score + 0.15 * filename_score, 1)
+
+        print(f"    {candidate_path.name}: content={content_score:.0f}  file={filename_score:.0f}  score={combined}")
+        if combined > best_score:
+            best_score = combined
             best_path = str(candidate_path)
 
     return best_path, best_score
@@ -339,7 +355,7 @@ async def run_pipeline(
     # Phase 0: Auto-select ISI if not provided
     if isi_path is None:
         print(f"\n[Phase 0] Auto-selecting ISI from {isi_dir}/")
-        isi_path, match_score = auto_select_isi(fa_full_text, isi_dir)
+        isi_path, match_score = auto_select_isi(fa_full_text, isi_dir, fa_path=fa_path)
         print(f"  → Selected: {Path(isi_path).name} (score: {match_score:.0f})")
 
     # Phase 1b: Extract ISI text from docx
