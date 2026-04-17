@@ -19,6 +19,10 @@ uv run python pipeline.py path/to/fa.pdf           # Custom FA, auto-selects ISI
 uv run python pipeline.py path/to/fa.pdf isi.docx  # Explicit FA + ISI pair
 ```
 
+```bash
+uv run python run_all.py                           # Batch-run every finalassets/*.pdf → pipeline_results_<ts>.xlsx
+```
+
 Input files live in `finalassets/` (PDFs) and `isi/` (`.docx` files). Pass `debug=True` to `run_pipeline()` to print per-section Coverage/Authenticity/F1 scores during Phase 3.
 
 There are no automated tests in this repository.
@@ -35,9 +39,12 @@ For LLM calls (Blueprint + extraction), one of:
 
 ## Architecture
 
-Two files make up the pipeline:
+Three files make up the pipeline:
 - **`pipeline.py`** — 4-phase extraction pipeline (Azure DI + LLM + deduplication + audit output)
 - **`section_scorer.py`** — section-level scoring layer; call `SectionScorer().compare(blueprint, page_results)` after Phase 2
+- **`models.py`** — shared Pydantic schemas (`ISIBlueprint`, `ISISection`, `FAFragment`, `FAPageFragments`) and text utilities (`normalize_text`, `_split_sentences`) used by the other two
+
+`run_all.py` wraps `run_pipeline()` in a loop over `finalassets/*.pdf` and writes a two-sheet Excel report (`Summary`, `Section Details`) via openpyxl.
 
 ### Pipeline (`pipeline.py`)
 A 4-phase compliance pipeline that checks whether a pharmaceutical Final Asset (FA) PDF correctly reproduces its Important Safety Information (ISI).
@@ -58,7 +65,7 @@ A 4-phase compliance pipeline that checks whether a pharmaceutical Final Asset (
 ### Phase 3 — Section-wise scoring
 `score_section()` compares each `ISISection.content` against the FA fragments mapped to that section:
 - **Coverage** (ISI → FA): best fuzzy match per ISI sentence, averaged; scores below 75 penalised ×0.6.
-- **Authenticity** (FA → ISI): best fuzzy match per FA fragment; only scores ≥ 75 counted.
+- **Authenticity** (FA → ISI): each FA fragment scored against the full ISI text (not just its section); only scores ≥ 75 counted.
 - **F1**: harmonic mean. Short sentences (< 4 words) are skipped to avoid noise from headers/labels.
 
 Text normalization before scoring: NFKC Unicode, hyphenated line-break repair (`contra-\nindication`), non-breaking space removal, lowercased.
@@ -87,3 +94,4 @@ Text normalization before scoring: NFKC Unicode, hyphenated line-break repair (`
 - **Scoring** — `difflib.SequenceMatcher` (order + spelling sensitive), scaled to 0–100
 - **Diffs** — `difflib.ndiff` word-level; `- word` = in ISI but wrong/missing in FA, `+ word` = what FA has instead
 - **Title resolution + dedup** — rapidfuzz (intentionally order-insensitive for title matching and repeated footer detection)
+- **Debug reports** — `SectionScorer.generate_debug_report(blueprint, page_results, out_path)` writes a human-readable per-section scoring analysis for debugging low-coverage sentences
